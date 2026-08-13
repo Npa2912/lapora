@@ -59,6 +59,23 @@ const productSchema = new mongoose.Schema(
     description: {
       type: String,
     },
+    isFeaturedHero: {
+      type: Boolean,
+      default: false, // đánh dấu sản phẩm nào sẽ hiển thị ở Hero Banner trang chủ
+    },
+    heroTagline: {
+      type: String, // câu mô tả ngắn dưới tên sp, VD "Mỏng nhẹ bất ngờ. Hiệu năng vượt trội."
+    },
+    heroBackground: {
+      type: String, // ảnh nền tròn phía sau laptop
+    },
+    heroSpecs: [
+      {
+        icon: { type: String }, // key để frontend map ra icon: "cpu" | "screen" | "weight" | "battery"
+        label: { type: String }, // dòng trên, VD "Intel Core Ultra 7 155H"
+        value: { type: String }, // dòng dưới, VD "OLED 3K"
+      },
+    ],
   },
   {
     timestamps: true, // tự động thêm createdAt, updatedAt
