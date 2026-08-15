@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Bot, Mic, MicOff } from "lucide-react";
 import { MicVAD } from "@ricky0123/vad-web";
+import { setAiRecommendations } from "../../store/aiRecommendationStore";
 
 const API_URL = "http://localhost:5000";
 
@@ -34,6 +35,7 @@ function float32ToWavBlob(
 
   for (let index = 0; index < samples.length; index += 1) {
     const sample = Math.max(-1, Math.min(1, samples[index]));
+
     view.setInt16(
       44 + index * bytesPerSample,
       sample < 0 ? sample * 0x8000 : sample * 0x7fff,
@@ -50,91 +52,191 @@ export default function VoiceAssistantButton() {
   const [status, setStatus] = useState("Bấm robot để bắt đầu tư vấn");
 
   const vadRef = useRef<MicVAD | null>(null);
-  const rawMicStreamRef = useRef<MediaStream | null>(null);
-  const micAudioContextRef = useRef<AudioContext | null>(null);
-  const aiAudioRef = useRef<HTMLAudioElement | null>(null);
-  const audioUrlRef = useRef<string | null>(null);
-
-  const ttsAbortRef = useRef<AbortController | null>(null);
   const consultAbortRef = useRef<AbortController | null>(null);
 
   const isListeningRef = useRef(false);
   const turnIdRef = useRef(0);
   const historyRef = useRef<{ role: string; content: string }[]>([]);
 
-  const stopAiVoice = () => {
-    ttsAbortRef.current?.abort();
-    ttsAbortRef.current = null;
+  const voiceSocketRef = useRef<WebSocket | null>(null);
+  const activeStreamRequestIdRef = useRef<string | null>(null);
 
-    if (aiAudioRef.current) {
-      aiAudioRef.current.pause();
-      aiAudioRef.current.currentTime = 0;
-      aiAudioRef.current = null;
-    }
+  // Audio PCM streaming do Cartesia trả về.
+  const streamAudioContextRef = useRef<AudioContext | null>(null);
+  const nextAudioStartTimeRef = useRef(0);
+  const streamAudioSourcesRef = useRef<AudioBufferSourceNode[]>([]);
 
-    if (audioUrlRef.current) {
-      URL.revokeObjectURL(audioUrlRef.current);
-      audioUrlRef.current = null;
-    }
+  const stopStreamingAiAudio = () => {
+    streamAudioSourcesRef.current.forEach((source) => {
+      try {
+        source.stop();
+      } catch {
+        // Audio source đã phát xong.
+      }
+    });
+
+    streamAudioSourcesRef.current = [];
+    nextAudioStartTimeRef.current = 0;
   };
 
-  const speakAiReply = async (text: string, turnId: number) => {
-    try {
-      stopAiVoice();
+  const playPcmChunk = async (
+    base64Audio: string,
+    sampleRate = 44100
+  ) => {
+    let audioContext = streamAudioContextRef.current;
 
-      const controller = new AbortController();
-      ttsAbortRef.current = controller;
+    if (!audioContext) {
+      audioContext = new AudioContext({ sampleRate });
+      streamAudioContextRef.current = audioContext;
+    }
 
-      setStatus("AI đang trả lời...");
+    if (audioContext.state === "suspended") {
+      await audioContext.resume();
+    }
 
-      const response = await fetch(`${API_URL}/api/voice/speak`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-        signal: controller.signal,
-      });
+    const binary = atob(base64Audio);
+    const bytes = new Uint8Array(binary.length);
 
-      if (!response.ok) {
-        throw new Error("Không thể tạo giọng nói AI.");
-      }
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
 
-      if (!isListeningRef.current || turnId !== turnIdRef.current) {
+    const pcmSamples = new Float32Array(bytes.buffer);
+
+    if (!pcmSamples.length) {
+      return;
+    }
+
+    const audioBuffer = audioContext.createBuffer(
+      1,
+      pcmSamples.length,
+      sampleRate
+    );
+
+    audioBuffer.copyToChannel(pcmSamples, 0);
+
+    const source = audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioContext.destination);
+
+    // Xếp audio chunk nối tiếp nhau, tránh tiếng nói bị giật.
+    const startAt = Math.max(
+      audioContext.currentTime + 0.05,
+      nextAudioStartTimeRef.current
+    );
+
+    source.start(startAt);
+
+    nextAudioStartTimeRef.current = startAt + audioBuffer.duration;
+    streamAudioSourcesRef.current.push(source);
+
+    source.onended = () => {
+      streamAudioSourcesRef.current =
+        streamAudioSourcesRef.current.filter((item) => item !== source);
+    };
+  };
+
+  const stopAiVoice = () => {
+    stopStreamingAiAudio();
+  };
+
+  const connectVoiceSocket = () => {
+    return new Promise<void>((resolve, reject) => {
+      const currentSocket = voiceSocketRef.current;
+
+      if (currentSocket?.readyState === WebSocket.OPEN) {
+        resolve();
         return;
       }
 
-      const audioBlob = await response.blob();
+      if (currentSocket?.readyState === WebSocket.CONNECTING) {
+        currentSocket.addEventListener("open", () => resolve(), {
+          once: true,
+        });
 
-      if (!isListeningRef.current || turnId !== turnIdRef.current) {
+        currentSocket.addEventListener(
+          "error",
+          () => reject(new Error("Không thể kết nối Voice WebSocket.")),
+          { once: true }
+        );
+
         return;
       }
 
-      const audioUrl = URL.createObjectURL(audioBlob);
-      audioUrlRef.current = audioUrl;
+      const ws = new WebSocket("ws://localhost:5000/ws/voice");
 
-      const audio = new Audio(audioUrl);
-      aiAudioRef.current = audio;
+      ws.onopen = () => {
+        console.log("Voice WebSocket: đã kết nối");
+        ws.send(JSON.stringify({ type: "ping" }));
+        resolve();
+      };
 
-      audio.onended = () => {
-        if (audioUrlRef.current === audioUrl) {
-          URL.revokeObjectURL(audioUrl);
-          audioUrlRef.current = null;
-        }
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
 
-        if (isListeningRef.current && turnId === turnIdRef.current) {
-          setStatus("Trợ lý đang chờ bạn nói...");
+          console.log("Voice WebSocket nhận:", data);
+
+          // Bỏ audio thuộc câu cũ khi người dùng đã chen ngang.
+          if (
+            data.requestId &&
+            data.requestId !== activeStreamRequestIdRef.current
+          ) {
+            return;
+          }
+
+          if (data.type === "audio_chunk") {
+            void playPcmChunk(data.audio, data.sampleRate);
+            return;
+          }
+
+          if (data.type === "stream_start") {
+            setStatus("AI đang trả lời...");
+            return;
+          }
+
+          if (data.type === "stream_end") {
+            if (data.history) {
+              historyRef.current = data.history;
+            }
+
+            if (data.products?.length) {
+              setAiRecommendations(data.products);
+
+              if (!window.location.pathname.startsWith("/products")) {
+                window.history.pushState({}, "", "/products?source=ai");
+                window.dispatchEvent(new PopStateEvent("popstate"));
+              }
+            }
+
+            console.log("AI trả lời xong:", data.reply);
+            console.log("Sản phẩm AI chọn:", data.products);
+
+            setStatus("Trợ lý đang chờ bạn nói...");
+            return;
+          }
+
+          if (data.type === "stream_error") {
+            console.error("Streaming AI lỗi:", data.message);
+            setStatus("Streaming AI gặp lỗi. Bạn hãy nói lại.");
+          }
+        } catch {
+          console.log("Voice WebSocket nhận raw:", event.data);
         }
       };
 
-      await audio.play();
-    } catch (error) {
-      if ((error as Error).name !== "AbortError") {
-        console.error("TTS error:", error);
+      ws.onerror = (error) => {
+        console.error("Voice WebSocket lỗi:", error);
+        reject(new Error("Không thể kết nối Voice WebSocket."));
+      };
 
-        if (isListeningRef.current) {
-          setStatus("Không thể phát giọng AI. Bạn hãy nói tiếp.");
-        }
-      }
-    }
+      ws.onclose = () => {
+        console.log("Voice WebSocket: đã đóng");
+        voiceSocketRef.current = null;
+      };
+
+      voiceSocketRef.current = ws;
+    });
   };
 
   const sendAudioToAI = async (
@@ -150,7 +252,7 @@ export default function VoiceAssistantButton() {
         return;
       }
 
-      setStatus("AI đang suy nghĩ...");
+      setStatus("Đang nghe và chuyển giọng nói thành chữ...");
 
       consultAbortRef.current?.abort();
 
@@ -159,9 +261,10 @@ export default function VoiceAssistantButton() {
 
       const formData = new FormData();
       formData.append("audio", audioBlob, "voice-message.wav");
-      formData.append("history", JSON.stringify(historyRef.current));
+      
 
-      const response = await fetch(`${API_URL}/api/voice/consult`, {
+      // Chỉ gọi Whisper để lấy transcript.
+      const response = await fetch(`${API_URL}/api/voice/transcribe`, {
         method: "POST",
         body: formData,
         signal: controller.signal,
@@ -170,39 +273,50 @@ export default function VoiceAssistantButton() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.message || "Không thể gửi audio đến AI.");
+        throw new Error(data.message || "Không thể chuyển giọng nói thành chữ.");
       }
 
       if (!isListeningRef.current || turnId !== turnIdRef.current) {
         return;
       }
 
-      // Backend đã xác định đây là tiếng nhiễu / transcript không liên quan.
-      if (data.ignored) {
-        console.log("AI bỏ qua audio nhiễu");
-        setStatus("Trợ lý đang chờ bạn nói...");
+      const transcript = data.text?.trim() || "";
+
+      if (transcript.length < 2) {
+        console.log("Whisper không nghe được nội dung đủ rõ");
+        setStatus("Em chưa nghe rõ. Bạn nói lại giúp em nhé.");
         return;
       }
 
-      console.log("Bạn nói:", data.transcript);
-      console.log("AI trả lời:", data.reply);
-      console.log("Sản phẩm:", data.products);
+      console.log("Bạn nói:", transcript);
 
-      if (data.history) {
-        historyRef.current = data.history;
+      const socket = voiceSocketRef.current;
+
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        throw new Error("Kết nối streaming AI chưa sẵn sàng.");
       }
 
-      if (data.reply) {
-        await speakAiReply(data.reply, turnId);
-      } else {
-        setStatus("Trợ lý đang chờ bạn nói...");
-      }
+      const requestId = crypto.randomUUID();
+
+      // Từ thời điểm này chỉ phát audio của câu hỏi mới.
+      activeStreamRequestIdRef.current = requestId;
+
+      socket.send(
+        JSON.stringify({
+          type: "ai_stream",
+          requestId,
+          message: transcript,
+          history: historyRef.current,
+        })
+      );
+
+      setStatus("AI đang trả lời...");
     } catch (error) {
       if ((error as Error).name === "AbortError") {
         return;
       }
 
-      console.error("Voice consult error:", error);
+      console.error("Voice transcription/stream error:", error);
 
       if (isListeningRef.current) {
         setStatus("Có lỗi xảy ra. Bạn nói lại giúp em nhé.");
@@ -213,6 +327,7 @@ export default function VoiceAssistantButton() {
   const stopAssistant = () => {
     isListeningRef.current = false;
     turnIdRef.current += 1;
+    activeStreamRequestIdRef.current = null;
 
     consultAbortRef.current?.abort();
     consultAbortRef.current = null;
@@ -222,6 +337,9 @@ export default function VoiceAssistantButton() {
     vadRef.current?.pause();
     vadRef.current = null;
 
+    voiceSocketRef.current?.close();
+    voiceSocketRef.current = null;
+
     setIsListening(false);
     setIsUserSpeaking(false);
     setStatus("Bấm robot để bắt đầu tư vấn");
@@ -229,12 +347,14 @@ export default function VoiceAssistantButton() {
 
   const startAssistant = async () => {
     try {
+      setStatus("Đang kết nối trợ lý AI...");
+      await connectVoiceSocket();
+
       isListeningRef.current = true;
       setIsListening(true);
       setStatus("Đang khởi động microphone...");
 
       const vad = await MicVAD.new({
-        // Dùng CDN để tránh lỗi Vite với ort-wasm-simd-threaded.mjs
         baseAssetPath:
           "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/",
         onnxWASMBasePath:
@@ -252,32 +372,34 @@ export default function VoiceAssistantButton() {
             },
           }),
 
-        // Không quá nhạy như code đo volume cũ.
         positiveSpeechThreshold: 0.17,
         negativeSpeechThreshold: 0.1,
-
         minSpeechMs: 70,
         redemptionMs: 2200,
         preSpeechPadMs: 1000,
 
-        // Chỉ khi Silero xác nhận là người thực sự nói
-        // mới được cắt tiếng AI.
         onSpeechRealStart: () => {
-          if (!isListeningRef.current) return;
+          if (!isListeningRef.current) {
+            return;
+          }
 
           console.log("Silero: xác nhận người dùng đang nói");
 
           turnIdRef.current += 1;
+
+          // Hủy Whisper đang chờ, không phát câu AI cũ nữa.
           consultAbortRef.current?.abort();
+          activeStreamRequestIdRef.current = null;
           stopAiVoice();
 
           setIsUserSpeaking(true);
           setStatus("Đang nghe bạn...");
         },
 
-        // Audio này đã bao gồm phần đầu câu nhờ preSpeechPadMs.
         onSpeechEnd: async (audio) => {
-          if (!isListeningRef.current) return;
+          if (!isListeningRef.current) {
+            return;
+          }
 
           const currentTurnId = turnIdRef.current;
 
@@ -291,8 +413,6 @@ export default function VoiceAssistantButton() {
           await sendAudioToAI(audio, currentTurnId);
         },
 
-        // Tiếng động quá ngắn sẽ vào đây, không gửi Whisper,
-        // không tắt tiếng AI.
         onVADMisfire: () => {
           console.log("Silero: bỏ qua tiếng động ngắn/nhiễu");
 
@@ -313,11 +433,11 @@ export default function VoiceAssistantButton() {
       vad.start();
       setStatus("Trợ lý đang chờ bạn nói...");
     } catch (error) {
-      console.error("Không thể khởi tạo Silero VAD:", error);
+      console.error("Không thể khởi tạo trợ lý giọng nói:", error);
 
       isListeningRef.current = false;
       setIsListening(false);
-      setStatus("Không thể mở microphone. Kiểm tra quyền micro.");
+      setStatus("Không thể mở trợ lý. Kiểm tra server và quyền micro.");
     }
   };
 
@@ -327,15 +447,19 @@ export default function VoiceAssistantButton() {
       return;
     }
 
-    startAssistant();
+    void startAssistant();
   };
 
   useEffect(() => {
     return () => {
       isListeningRef.current = false;
       vadRef.current?.pause();
-      stopAiVoice();
       consultAbortRef.current?.abort();
+      stopAiVoice();
+      voiceSocketRef.current?.close();
+
+      streamAudioContextRef.current?.close();
+      streamAudioContextRef.current = null;
     };
   }, []);
 

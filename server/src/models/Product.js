@@ -1,50 +1,110 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const productSchema = new mongoose.Schema(
   {
     name: {
       type: String,
-      required: [true, 'Vui lòng nhập tên sản phẩm'],
+      required: [true, "Vui lòng nhập tên sản phẩm"],
       trim: true,
     },
     slug: {
       type: String,
-      unique: true, // không cho trùng, dùng để tạo URL đẹp: /products/macbook-air-m3
+      unique: true,
     },
     brand: {
       type: String,
-      required: true, // Apple, Dell, Asus, Lenovo...
+      required: true,
     },
     category: {
       type: String,
-      required: true, // Gaming, Văn phòng, Đồ họa, Sinh viên
+      required: true,
     },
     price: {
       type: Number,
-      required: [true, 'Vui lòng nhập giá'],
+      required: [true, "Vui lòng nhập giá"],
       min: 0,
     },
     oldPrice: {
-      type: Number, // giá gốc trước khuyến mãi, không bắt buộc
+      type: Number,
     },
     images: {
-      type: [String], // mảng các URL ảnh
+      type: [String],
       required: true,
     },
+
     specs: {
       cpu: { type: String, required: true },
+      gpu: {
+        type: String,
+        default: "Card đồ họa tích hợp",
+      },
       ram: { type: String, required: true },
       storage: { type: String, required: true },
       screen: { type: String, required: true },
+      weight: { type: String },
+      battery: { type: String },
+      ports: { type: [String], default: [] },
     },
+
+    // Dữ liệu để engine/AI tư vấn như nhân viên có kinh nghiệm.
+    advice: {
+      suitableFor: {
+        type: [String],
+        default: [],
+        // VD: ["Sinh viên", "Lập trình cơ bản", "Văn phòng"]
+      },
+      notIdealFor: {
+        type: [String],
+        default: [],
+        // VD: ["AI nặng", "Render 3D chuyên nghiệp"]
+      },
+      strengths: {
+        type: [String],
+        default: [],
+        // VD: ["Nhẹ dễ mang đi học", "Pin tốt", "Màn hình đẹp"]
+      },
+      limitations: {
+        type: [String],
+        default: [],
+        // VD: ["Không phù hợp game AAA", "RAM không nâng cấp được"]
+      },
+      upgradeability: {
+        ram: {
+          type: String,
+          default: "Chưa rõ",
+          // VD: "Nâng cấp được tối đa 32GB"
+        },
+        storage: {
+          type: String,
+          default: "Chưa rõ",
+        },
+      },
+      portability: {
+        type: String,
+        enum: ["Rất nhẹ", "Nhẹ", "Cân bằng", "Nặng"],
+        default: "Cân bằng",
+      },
+      performanceTier: {
+        type: String,
+        enum: ["Cơ bản", "Cân bằng", "Hiệu năng cao"],
+        default: "Cân bằng",
+      },
+      expectedUseYears: {
+        type: Number,
+        min: 1,
+        max: 8,
+        default: 3,
+      },
+    },
+
     stock: {
       type: Number,
       required: true,
-      default: 0, // số lượng còn trong kho
+      default: 0,
     },
     isNew: {
       type: Boolean,
-      default: false, // để gắn badge "MỚI" như trong ảnh
+      default: false,
     },
     rating: {
       type: Number,
@@ -59,27 +119,28 @@ const productSchema = new mongoose.Schema(
     description: {
       type: String,
     },
+
     isFeaturedHero: {
       type: Boolean,
-      default: false, // đánh dấu sản phẩm nào sẽ hiển thị ở Hero Banner trang chủ
+      default: false,
     },
     heroTagline: {
-      type: String, // câu mô tả ngắn dưới tên sp, VD "Mỏng nhẹ bất ngờ. Hiệu năng vượt trội."
+      type: String,
     },
     heroBackground: {
-      type: String, // ảnh nền tròn phía sau laptop
+      type: String,
     },
     heroSpecs: [
       {
-        icon: { type: String }, // key để frontend map ra icon: "cpu" | "screen" | "weight" | "battery"
-        label: { type: String }, // dòng trên, VD "Intel Core Ultra 7 155H"
-        value: { type: String }, // dòng dưới, VD "OLED 3K"
+        icon: { type: String },
+        label: { type: String },
+        value: { type: String },
       },
     ],
   },
   {
-    timestamps: true, // tự động thêm createdAt, updatedAt
+    timestamps: true,
   }
 );
 
-module.exports = mongoose.model('Product', productSchema);
+module.exports = mongoose.model("Product", productSchema);

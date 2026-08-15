@@ -5,6 +5,8 @@ const connectDB = require('./config/db');
 const productRoutes = require('./routes/productRoutes');
 const aiRoutes = require("./routes/aiRoutes");
 const voiceRoutes = require("./routes/voiceRoutes");
+const http = require("http");
+const { setupVoiceGateway } = require("./realtime/voiceGateway");
 
 connectDB();
 
@@ -22,6 +24,10 @@ app.get('/', (req, res) => {
 app.use('/api/products', productRoutes);
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+const server = http.createServer(app);
+
+setupVoiceGateway(server);
+
+server.listen(PORT, () => {
   console.log(`Server đang chạy tại http://localhost:${PORT}`);
 });
